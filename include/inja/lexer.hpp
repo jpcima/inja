@@ -24,6 +24,13 @@ class Lexer {
     CommentBody
   } m_state;
 
+  enum class Trim {
+    None,
+    Newline,
+    Whitespace,
+    Never,
+  };
+
   const LexerConfig& m_config;
   nonstd::string_view m_in;
   size_t m_tok_start;
@@ -60,14 +67,18 @@ class Lexer {
         // try to match one of the opening sequences, and get the close
         nonstd::string_view open_str = m_in.substr(m_pos);
         bool must_lstrip = false;
+        bool must_skip_ws = false;
         if (inja::string_view::starts_with(open_str, m_config.expression_open)) {
           m_state = State::ExpressionStart;
+          must_skip_ws = char_get(open_str, m_config.expression_open.size()) == '-';
         } else if (inja::string_view::starts_with(open_str, m_config.statement_open)) {
           m_state = State::StatementStart;
           must_lstrip = m_config.lstrip_blocks;
+          must_skip_ws = char_get(open_str, m_config.statement_open.size()) == '-';
         } else if (inja::string_view::starts_with(open_str, m_config.comment_open)) {
           m_state = State::CommentStart;
           must_lstrip = m_config.lstrip_blocks;
+          must_skip_ws = char_get(open_str, m_config.comment_open.size()) == '-';
         } else if ((m_pos == 0 || m_in[m_pos - 1] == '\n') &&
                    inja::string_view::starts_with(open_str, m_config.line_statement)) {
           m_state = State::LineStart;
@@ -77,7 +88,9 @@ class Lexer {
         }
 
         nonstd::string_view text = string_view::slice(m_in, m_tok_start, m_pos);
-        if (must_lstrip)
+        if (must_skip_ws)
+          text = clear_trailing_whitespace(text);
+        else if (must_lstrip)
           text = clear_final_line_if_whitespace(text);
 
         if (text.empty()) goto again;  // don't generate empty token
@@ -86,6 +99,8 @@ class Lexer {
       case State::ExpressionStart: {
         m_state = State::ExpressionBody;
         m_pos += m_config.expression_open.size();
+        if (char_get(m_in, m_pos) == '-')
+          m_pos += 1;
         return make_token(Token::Kind::ExpressionOpen);
       }
       case State::LineStart: {
@@ -96,19 +111,24 @@ class Lexer {
       case State::StatementStart: {
         m_state = State::StatementBody;
         m_pos += m_config.statement_open.size();
+        if (char_get(m_in, m_pos) == '-')
+          m_pos += 1;
         return make_token(Token::Kind::StatementOpen);
       }
       case State::CommentStart: {
         m_state = State::CommentBody;
         m_pos += m_config.comment_open.size();
+        if (char_get(m_in, m_pos) == '-')
+          m_pos += 1;
         return make_token(Token::Kind::CommentOpen);
       }
       case State::ExpressionBody:
         return scan_body(m_config.expression_close, Token::Kind::ExpressionClose);
       case State::LineBody:
-        return scan_body("\n", Token::Kind::LineStatementClose);
+        return scan_body("\n", Token::Kind::LineStatementClose, Trim::Never);
       case State::StatementBody:
-        return scan_body(m_config.statement_close, Token::Kind::StatementClose, m_config.trim_blocks);
+        return scan_body(m_config.statement_close, Token::Kind::StatementClose,
+                         m_config.trim_blocks ? Trim::Newline : Trim::None);
       case State::CommentBody: {
         // fast-scan to comment close
         size_t end = m_in.substr(m_pos).find(m_config.comment_close);
@@ -130,7 +150,7 @@ class Lexer {
   const LexerConfig& get_config() const { return m_config; }
 
  private:
-  Token scan_body(nonstd::string_view close, Token::Kind closeKind, bool trim = false) {
+  Token scan_body(nonstd::string_view close, Token::Kind closeKind, Trim trim = Trim::None) {
   again:
     // skip whitespace (except for \n as it might be a close)
     if (m_tok_start >= m_in.size()) return make_token(Token::Kind::Eof);
@@ -145,7 +165,9 @@ class Lexer {
       m_state = State::Text;
       m_pos = m_tok_start + close.size();
       Token tok = make_token(closeKind);
-      if (trim)
+      if (trim == Trim::Whitespace)
+        skip_whitespace();
+      else if (trim == Trim::Newline)
         skip_newline();
       return tok;
     }
@@ -201,6 +223,14 @@ class Lexer {
         return make_token(Token::Kind::Unknown);
       case '\"':
         return scan_string();
+      case '-':
+        if (trim != Trim::Never &&
+            inja::string_view::starts_with(m_in.substr(m_pos), close)) {
+          trim = Trim::Whitespace;
+          m_tok_start += 1;
+          goto again;
+        }
+        /* fall through */
       case '0':
       case '1':
       case '2':
@@ -211,7 +241,6 @@ class Lexer {
       case '7':
       case '8':
       case '9':
-      case '-':
         return scan_number();
       case '_':
         return scan_id();
@@ -269,6 +298,15 @@ class Lexer {
     return Token(kind, string_view::slice(m_in, m_tok_start, m_pos));
   }
 
+  void skip_whitespace() {
+    for (bool ws = true; ws && m_pos < m_in.size();) {
+      char ch = m_in[m_pos];
+      ws = ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+      if (ws)
+        m_pos += 1;
+    }
+  }
+
   void skip_newline() {
     if (m_pos < m_in.size()) {
       char ch = m_in[m_pos];
@@ -280,6 +318,21 @@ class Lexer {
           m_pos += 1;
       }
     }
+  }
+
+  static char char_get(nonstd::string_view text, size_t index, char def = '\0') {
+    return (index < text.size()) ? text[index] : def;
+  };
+
+  static nonstd::string_view clear_trailing_whitespace(nonstd::string_view text)
+  {
+    for (bool ws = true; ws && !text.empty();) {
+      char ch = text.back();
+      ws = ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+      if (ws)
+        text.remove_suffix(1);
+    }
+    return text;
   }
 
   static nonstd::string_view clear_final_line_if_whitespace(nonstd::string_view text)
