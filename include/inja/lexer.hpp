@@ -73,12 +73,14 @@ class Lexer {
           must_skip_ws = char_get(open_str, m_config.expression_open.size()) == '-';
         } else if (inja::string_view::starts_with(open_str, m_config.statement_open)) {
           m_state = State::StatementStart;
-          must_lstrip = m_config.lstrip_blocks;
-          must_skip_ws = char_get(open_str, m_config.statement_open.size()) == '-';
+          char ch_next = char_get(open_str, m_config.statement_open.size());
+          must_lstrip = m_config.lstrip_blocks && ch_next != '+';
+          must_skip_ws = ch_next == '-';
         } else if (inja::string_view::starts_with(open_str, m_config.comment_open)) {
           m_state = State::CommentStart;
-          must_lstrip = m_config.lstrip_blocks;
-          must_skip_ws = char_get(open_str, m_config.comment_open.size()) == '-';
+          char ch_next = char_get(open_str, m_config.comment_open.size());
+          must_lstrip = m_config.lstrip_blocks && ch_next != '+';
+          must_skip_ws = ch_next == '-';
         } else if ((m_pos == 0 || m_in[m_pos - 1] == '\n') &&
                    inja::string_view::starts_with(open_str, m_config.line_statement)) {
           m_state = State::LineStart;
@@ -111,14 +113,16 @@ class Lexer {
       case State::StatementStart: {
         m_state = State::StatementBody;
         m_pos += m_config.statement_open.size();
-        if (char_get(m_in, m_pos) == '-')
+        char ch_next = char_get(m_in, m_pos);
+        if (ch_next == '-' || ch_next == '+')
           m_pos += 1;
         return make_token(Token::Kind::StatementOpen);
       }
       case State::CommentStart: {
         m_state = State::CommentBody;
         m_pos += m_config.comment_open.size();
-        if (char_get(m_in, m_pos) == '-')
+        char ch_next = char_get(m_in, m_pos);
+        if (ch_next == '-' || ch_next == '+')
           m_pos += 1;
         return make_token(Token::Kind::CommentOpen);
       }
